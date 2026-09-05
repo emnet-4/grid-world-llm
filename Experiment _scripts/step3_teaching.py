@@ -104,6 +104,13 @@ full_context = "\n".join(
 )
 
 with open("teaching_transcript.json", "w") as f:
-    json.dump({"transcript": transcript, "full_context": full_context}, f, indent=2)
+    json.dump({
+        "format": "pairs",
+        # every pair is stated, so no question is held out and
+        # memorisation cannot be distinguished from inference here
+        "taught_pairs": [sorted(list(p)) for p in pairs],
+        "transcript": transcript,
+        "full_context": full_context,
+    }, f, indent=2)
 
 print(f"\nSaved teaching_transcript.json ({len(transcript)} facts taught)")
