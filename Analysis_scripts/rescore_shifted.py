@@ -40,12 +40,31 @@ import itertools
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CONDITIONS = [
+    # pair-fact teaching and the recovery conditions
     "RL_Exp1_Time1.json", "RL_Exp1_Time2.json", "RL_Exp1_Time3.json",
-    "RL_Exp2_Time3.json", "RL_Exp3_Time3.json",
+    "RL_Exp2_Time3.json", "RL_Exp3_Time3.json", "RL_Exp5_Time3.json",
+    # the alternative teaching formats
     "RL_Exp4_Time2.json", "RL_Exp4_Time3.json",
+    "RL_Coord_Time2.json", "RL_Coord_Time3.json",
+    "RL_Trail_Time2.json", "RL_Trail_Time3.json",
+    "RL_Both_Time2.json", "RL_Both_Time3.json",
 ]
 
+GRID_SIZE = 10
 SEARCH = range(-9, 10)   # candidate shifts on each axis
+
+# Whether to also try flipping each axis before shifting.
+#
+# The teaching gives relative offsets, so a Student can get the shape right and
+# the orientation wrong. One response chained the trail as "from R1 (0,0),
+# moving 2 west and 3 south leads to R2 (2,3)", adding where it should have
+# subtracted on both axes. That is a reflection, and no amount of translation
+# corrects it, so a correct-but-mirrored layout scores as a total failure.
+#
+# Reporting both numbers separates "the layout is wrong" from "the layout is
+# right and the conventions are inverted", which are different failures.
+TRY_REFLECTIONS = True
+REFLECTIONS = [(1, 1), (-1, 1), (1, -1), (-1, -1)]
 
 MIN_ROOMS = 3
 # Fitting a translation to fewer than three points is meaningless. With one
@@ -61,8 +80,8 @@ def manhattan(ax, ay, bx, by):
 def best_fit_shift(pred, truth):
     """
     Find the (dx, dy) that minimises total Manhattan error when added to every
-    predicted coordinate. Brute force over the grid -- only 361 combinations
-    and at most 5 rooms, so speed is not a concern.
+    predicted coordinate. Brute force -- 361 combinations over at most 5 rooms,
+    so speed is not a concern.
 
     Returns (dx, dy, mean_error_after_shift).
     """
@@ -81,6 +100,39 @@ def best_fit_shift(pred, truth):
                 best = (dx, dy, total)
 
     return best[0], best[1], best[2] / len(common)
+
+
+def best_fit_rigid(pred, truth):
+    """
+    As above, but also try flipping each axis before shifting.
+
+    A model that consistently treats west as increasing x has the layout right
+    and the convention backwards. Translation cannot fix that; a reflection
+    can. Returns (flip_x, flip_y, dx, dy, mean_error).
+    """
+    common = [k for k in pred if k in truth]
+    if len(common) < MIN_ROOMS:
+        return 1, 1, 0, 0, None
+
+    centre = (GRID_SIZE - 1) / 2 if "GRID_SIZE" in globals() else 4.5
+
+    best = (1, 1, 0, 0, float("inf"))
+    for fx, fy in (REFLECTIONS if TRY_REFLECTIONS else [(1, 1)]):
+        flipped = {
+            k: (centre + fx * (v[0] - centre), centre + fy * (v[1] - centre))
+            for k, v in pred.items()
+        }
+        for dx in SEARCH:
+            for dy in SEARCH:
+                total = sum(
+                    manhattan(flipped[k][0] + dx, flipped[k][1] + dy,
+                              truth[k][0], truth[k][1])
+                    for k in common
+                )
+                if total < best[4]:
+                    best = (fx, fy, dx, dy, total)
+
+    return best[0], best[1], best[2], best[3], best[4] / len(common)
 
 
 def raw_error(pred, truth):
@@ -106,10 +158,21 @@ def rescore_file(path, truth):
     if pred:
         raw = raw_error(pred, truth)
         dx, dy, shifted = best_fit_shift(pred, truth)
+        fx, fy, rdx, rdy, rigid = best_fit_rigid(pred, truth)
+
         d["mean_position_error_raw"] = raw
         d["mean_position_error_shifted"] = shifted
         d["position_best_fit_shift"] = [dx, dy]
         d["position_shift_improvement"] = (raw - shifted) if raw is not None else None
+
+        d["mean_position_error_rigid"] = rigid
+        d["position_best_fit_reflection"] = [fx, fy]
+        d["position_best_fit_rigid_shift"] = [rdx, rdy]
+        # a large gain here that shift alone did not capture means the layout
+        # was mirrored rather than misplaced
+        d["position_reflection_gain"] = (
+            (shifted - rigid) if (shifted is not None and rigid is not None) else None
+        )
         changed = True
 
     # ---- map answer ----
@@ -169,27 +232,44 @@ if __name__ == "__main__":
             d = rescore_file(path, truth)
 
             key = (entry["set"], cond)
-            tally.setdefault(key, {"raw": [], "shifted": [], "shifts": []})
+            tally.setdefault(key, {"raw": [], "shifted": [], "rigid": [],
+                                   "shifts": [], "flips": []})
             if d.get("mean_position_error_shifted") is not None:
                 tally[key]["raw"].append(d["mean_position_error_raw"])
                 tally[key]["shifted"].append(d["mean_position_error_shifted"])
                 tally[key]["shifts"].append(tuple(d["position_best_fit_shift"]))
+            if d.get("mean_position_error_rigid") is not None:
+                tally[key]["rigid"].append(d["mean_position_error_rigid"])
+                tally[key]["flips"].append(tuple(d["position_best_fit_reflection"]))
 
     # ---- report ----
-    print("=" * 92)
-    print("POSITION ERROR: raw vs translation-corrected")
-    print("=" * 92)
-    print(f"{'set':<20}{'condition':<22}{'raw':<10}{'shifted':<10}{'gained':<10}{'typical shift'}")
-    print("-" * 92)
+    print("=" * 104)
+    print("POSITION ERROR: raw, translation-corrected, and reflection-corrected")
+    print("=" * 104)
+    print(f"{'set':<20}{'condition':<22}{'raw':<9}{'shifted':<10}"
+          f"{'reflected':<11}{'shift gain':<12}{'reflect gain':<14}{'mirrored?'}")
+    print("-" * 104)
 
     for (s, cond), v in sorted(tally.items()):
         if not v["raw"]:
             continue
         raw = sum(v["raw"]) / len(v["raw"])
         sh = sum(v["shifted"]) / len(v["shifted"])
-        common_shift = max(set(v["shifts"]), key=v["shifts"].count)
+        rig = sum(v["rigid"]) / len(v["rigid"]) if v["rigid"] else None
+
+        # how often the best fit needed an axis flipped. A layout that is
+        # correctly shaped but mirrored cannot be repaired by translation, so
+        # a high rate here means the Student inverted a convention rather than
+        # reconstructing the wrong layout.
+        flipped = sum(1 for f in v["flips"] if f != (1, 1))
+        flip_rate = flipped / len(v["flips"]) if v["flips"] else 0.0
+
+        rig_txt = f"{rig:.2f}" if rig is not None else "—"
+        gain_txt = f"{sh - rig:.2f}" if rig is not None else "—"
+
         print(f"{s:<20}{cond.replace('.json',''):<22}"
-              f"{raw:<10.2f}{sh:<10.2f}{raw - sh:<10.2f}{common_shift}")
+              f"{raw:<9.2f}{sh:<10.2f}{rig_txt:<11}"
+              f"{raw - sh:<12.2f}{gain_txt:<14}{flip_rate:.0%}")
 
     print("\nBenchmarks for RAW error:      random guess 6.60, centre guess 5.00")
     print("Benchmarks for SHIFTED error:  random guess 5.47, degenerate answer ~4.00")
@@ -198,5 +278,8 @@ if __name__ == "__main__":
     print("and letting the optimiser drop that blob onto the true layout scores")
     print("about 4.00. So ~4.00, not 5.00, is the line a real layout has to beat.")
     print(f"\nCells with fewer than {MIN_ROOMS} answered rooms are excluded.")
-    print("\n'gained' is how much error was pure origin offset rather than a wrong layout.")
-    print("A large gain means the layout was better than the raw number suggested.")
+    print("\n'shift gain' is error that was pure origin offset rather than a wrong")
+    print("layout. 'reflect gain' is the further improvement from allowing an axis to")
+    print("be flipped: a Student can reconstruct the correct shape and invert a")
+    print("convention, which translation alone cannot repair. 'mirrored?' is how often")
+    print("the best fit needed a flip.")
