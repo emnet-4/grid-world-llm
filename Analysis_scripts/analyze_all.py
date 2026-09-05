@@ -107,6 +107,22 @@ CONDITIONS = [
      "taught with a drawn map instead of sentences"),
     ("RL_Exp4_Time3", "Exp 4 Time 3\nmap flushed",
      "map pushed out of the context window"),
+    ("RL_Exp5_Time3", "Exp 5 Time 3\nweights fine-tuned",
+     "LoRA-trained on ground truth, model answers with no context"),
+
+    # the three teaching formats, each with the transcript readable and flushed
+    ("RL_Coord_Time2", "Coordinates\nin context",
+     "taught absolute positions, transcript readable"),
+    ("RL_Coord_Time3", "Coordinates\nflushed",
+     "taught absolute positions, transcript flushed"),
+    ("RL_Trail_Time2", "Trail\nin context",
+     "taught as a walk visiting every room, transcript readable"),
+    ("RL_Trail_Time3", "Trail\nflushed",
+     "taught as a walk visiting every room, transcript flushed"),
+    ("RL_Both_Time2", "Trail + coords\nin context",
+     "taught both ways, transcript readable"),
+    ("RL_Both_Time3", "Trail + coords\nflushed",
+     "taught both ways, transcript flushed"),
 ]
 
 SET_LABELS = {
