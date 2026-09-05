@@ -12,13 +12,22 @@ import statistics
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CONDS = [
+    # the original pair-fact teaching
     ("RL_Exp1_Time1", "before teaching"),
     ("RL_Exp1_Time2", "teaching in ctx"),
     ("RL_Exp1_Time3", "flushed"),
     ("RL_Exp2_Time3", "own notes"),
-    ("RL_Exp3_Time3", "weights"),
+    ("RL_Exp3_Time3", "probe on notes"),
+    ("RL_Exp5_Time3", "weights tuned"),
+    # alternative teaching formats
     ("RL_Exp4_Time2", "map in ctx"),
     ("RL_Exp4_Time3", "map flushed"),
+    ("RL_Coord_Time2", "coords in ctx"),
+    ("RL_Coord_Time3", "coords flushed"),
+    ("RL_Trail_Time2", "trail in ctx"),
+    ("RL_Trail_Time3", "trail flushed"),
+    ("RL_Both_Time2", "both in ctx"),
+    ("RL_Both_Time3", "both flushed"),
 ]
 
 with open(os.path.join(HERE, "runs_index.json")) as f:
