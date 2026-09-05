@@ -108,10 +108,29 @@ def direction_prompt(p, q, context="", level=0):
 
 
 def position_prompt(room, context="", level=0):
+    """
+    Ask for one room's coordinates.
+
+    The Student is told rooms occupy distinct cells. That is true of the world
+    by construction and it was already stated in the whole-layout prompt, but
+    not here, so the Student had no reason to avoid giving the same coordinates
+    for several rooms. One run answered 8,5 for three rooms and 5,8 for the
+    other two.
+
+    Note this is told, not enforced. Each position question is a separate call
+    with no memory of the others, so the Student cannot check what it said
+    last time. Rejecting a duplicate would mean either feeding it its own
+    previous answers, which changes what the question tests, or retrying blind.
+    The whole-layout question is the one that can enforce consistency, since it
+    asks for all five at once, and the difference between the two is itself
+    worth measuring.
+    """
     return (
         context +
         f"What are the grid coordinates of room {room}? "
         f"Both x and y are between 0 and {GRID_SIZE - 1}.\n"
+        f"Each room is in a different cell, so no two rooms share the same "
+        f"coordinates.\n"
         f"{_force(level)}"
         f"Answer with EXACTLY the format \"x,y\" (for example \"3,7\"). No explanation."
     )
@@ -245,35 +264,67 @@ def parse_position(response):
     return (x, y)
 
 
-def parse_map(response, room_names):
+def _extract_coords(response: str, room_names: list[str]) -> dict:
     """
-    Pull "R0: 8,1" style lines out of the response. Tolerant of extra prose,
-    bullets, parentheses, and "=" instead of ":".
-
-    Returns None if two or more rooms are placed in the same cell. The world
-    never does that and the Student is told so in the prompt, so a duplicate
-    is a malformed answer rather than a wrong one, and it gets re-prompted
-    like any other malformed response.
+    Pull every "R0: 8,1" style pair out of the response, including ones that
+    fall outside the grid. Kept separate from validation so a malformed answer
+    can still be recorded rather than silently discarded.
     """
-    coords = {}
+    found = {}
     for name in room_names:
-        m = re.search(
-            rf"\b{re.escape(name)}\b\s*[:=]?\s*\(?\s*(\d+)\s*,\s*(\d+)\s*\)?",
+        match = re.search(
+            rf"\b{re.escape(name)}\b\s*[:=]?\s*\(?\s*(-?\d+)\s*,\s*(-?\d+)\s*\)?",
             response,
         )
-        if m:
-            x, y = int(m.group(1)), int(m.group(2))
-            if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
-                coords[name] = (x, y)
+        if match:
+            found[name] = (int(match.group(1)), int(match.group(2)))
+    return found
 
-    if not coords:
+
+def _in_range(x: int, y: int) -> bool:
+    return 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE
+
+
+def parse_map(response: str, room_names: list[str]):
+    """
+    Accept a whole-layout answer only if it is complete and valid.
+
+    Returns None, which triggers a re-prompt, when any of these hold:
+
+      - fewer than all rooms are given
+      - any coordinate falls outside the grid
+      - two rooms are placed in the same cell
+
+    Being strict here matters. An earlier version returned whatever parsed
+    cleanly and dropped the rest, so a response giving five coordinates of
+    which two were off the grid was accepted as a three-room answer on the
+    first attempt. The mean error was then computed over three rooms and
+    plotted beside bars built from five, and no retry was ever triggered even
+    though the answer plainly broke the stated rules.
+
+    Out-of-range coordinates are worth retrying rather than trimming, because
+    they usually indicate the model has compounded an error while chaining
+    steps together, which is a different failure from simply guessing wrong.
+    """
+    found = _extract_coords(response, room_names)
+
+    if len(found) < len(room_names):
+        return None
+    if any(not _in_range(x, y) for x, y in found.values()):
+        return None
+    if len(set(found.values())) < len(found):
         return None
 
-    # reject overlapping rooms
-    if len(set(coords.values())) < len(coords):
-        return None
+    return found
 
-    return coords
+
+def parse_map_lenient(response: str, room_names: list[str]):
+    """
+    Whatever could be read, valid or not. Used only to record what the model
+    said after the retries are exhausted, so a failure is documented rather
+    than lost.
+    """
+    return _extract_coords(response, room_names) or None
 
 
 # ---------------------------------------------------------------------
@@ -343,7 +394,7 @@ def run_all_probes(model, world, context=""):
             "error": err, "attempts": n,
         })
 
-    # --- whole-grid map ---
+    # --- whole-layout question ---
     print("  Whole-layout question...")
     raw, parsed, n = ask_forced(
         model,
@@ -351,25 +402,48 @@ def run_all_probes(model, world, context=""):
         lambda r: parse_map(r, room_names),
     )
     all_attempts.append(n)
+
+    # If the strict parse never succeeded, record what the model actually said
+    # so the failure is visible rather than appearing as missing data.
+    fallback = None
+    if parsed is None:
+        fallback = parse_map_lenient(raw, room_names)
+
+    scored = parsed or {}
     per_room = {}
-    if parsed:
-        for name, (gx, gy) in parsed.items():
-            per_room[name] = manhattan(gx, gy, rooms[name]["x"], rooms[name]["y"])
+    for name, (gx, gy) in scored.items():
+        per_room[name] = manhattan(gx, gy, rooms[name]["x"], rooms[name]["y"])
+
+    out_of_range = {}
+    if fallback:
+        out_of_range = {n_: list(c) for n_, c in fallback.items()
+                        if not (0 <= c[0] < GRID_SIZE and 0 <= c[1] < GRID_SIZE)}
+
     map_result = {
         "raw_response": raw,
-        "rejected_for_overlap": parsed is None and bool(
-            re.search(r"\bR\d+\b\s*[:=]?\s*\(?\s*\d+\s*,\s*\d+", raw)
-        ),
-        "parsed_coords": {k: list(v) for k, v in (parsed or {}).items()},
-        "n_rooms_placed": len(parsed or {}),
+        "accepted": parsed is not None,
+        "parsed_coords": {k: list(v) for k, v in scored.items()},
+        # everything readable from the final response, valid or not
+        "unvalidated_coords": {k: list(v) for k, v in (fallback or {}).items()},
+        "coords_out_of_range": out_of_range,
+        "n_rooms_placed": len(scored),
         "n_rooms_total": len(room_names),
         "per_room_error": per_room,
-        "mean_error": (sum(per_room.values()) / len(per_room)) if per_room else None,
+        # only scored when the answer was complete and valid, so this is never
+        # a mean over a subset of rooms
+        "mean_error": (sum(per_room.values()) / len(per_room)) if parsed else None,
         "attempts": n,
     }
 
     # --- summary ---
     valid_errs = [r["error"] for r in position_results if r["error"] is not None]
+
+    # How many distinct cells the Student named across the five position
+    # questions. The world always uses five, so anything less means it repeated
+    # itself. Each question is asked separately, so it cannot check, but a low
+    # count still tells us the answers are not forming a coherent layout.
+    given = [tuple(r["parsed"]) for r in position_results if r["parsed"]]
+    n_distinct_positions = len(set(given))
     all_q = triplet_results + direction_results + position_results
     n_unanswered = sum(1 for r in all_q if r["parsed"] is None)
 
@@ -396,6 +470,7 @@ def run_all_probes(model, world, context=""):
 
         "n_position_answered": len(valid_errs),
         "n_position_total": len(position_results),
+        "n_distinct_positions": n_distinct_positions,
 
         # how hard it was to get answers -- replaces refusal rate
         "mean_attempts": sum(all_attempts) / len(all_attempts),
